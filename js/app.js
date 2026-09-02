@@ -29,6 +29,24 @@ const state = {
   scheduleMapPicker: null,
 };
 
+const AUTH_EMAIL_DOMAIN = 'family-group.local';
+
+function toAuthEmail(username) {
+  const id = username.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+  if (id.length < 2) {
+    throw new Error('아이디는 영문·숫자·밑줄(_) 2자 이상으로 입력하세요.');
+  }
+  return `${id}@${AUTH_EMAIL_DOMAIN}`;
+}
+
+function setButtonLoading(button, isLoading, loadingText) {
+  if (!button) return;
+  button.disabled = isLoading;
+  if (!button.dataset.defaultText) {
+    button.dataset.defaultText = button.textContent;
+  }
+  button.textContent = isLoading ? loadingText : button.dataset.defaultText;
+}
 function toast(message) {
   const el = document.createElement('div');
   el.className = 'toast';
@@ -338,42 +356,77 @@ function formatDateTime(value) {
 $('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!supabase) return toast('Supabase 설정이 필요합니다. js/config.js를 확인하세요.');
-  const email = $('login-email').value.trim();
-  const password = $('login-password').value;
 
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) return toast(error.message);
+  const submitBtn = $('login-submit');
+  setButtonLoading(submitBtn, true, '로그인 중...');
 
-  state.user = (await supabase.auth.getUser()).data.user;
-  toast('로그인되었습니다.');
-  await loadUserGroup();
+  try {
+    const username = $('login-username').value.trim();
+    const password = $('login-password').value;
+    const email = toAuthEmail(username);
+
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) return toast(translateAuthError(error.message));
+
+    state.user = (await supabase.auth.getUser()).data.user;
+    toast('로그인되었습니다.');
+    await loadUserGroup();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setButtonLoading(submitBtn, false);
+  }
 });
 
 $('signup-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!supabase) return toast('Supabase 설정이 필요합니다. js/config.js를 확인하세요.');
 
-  const email = $('signup-email').value.trim();
-  const password = $('signup-password').value;
-  const displayName = $('signup-name').value.trim();
+  const submitBtn = $('signup-submit');
+  setButtonLoading(submitBtn, true, '가입 중...');
 
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: { data: { display_name: displayName } },
-  });
+  try {
+    const username = $('signup-username').value.trim();
+    const password = $('signup-password').value;
+    const displayName = $('signup-name').value.trim();
+    const email = toAuthEmail(username);
 
-  if (error) return toast(error.message);
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { display_name: displayName } },
+    });
 
-  if (data.session) {
-    state.user = data.user;
+    if (error) return toast(translateAuthError(error.message));
+
+    if (data.session) {
+      state.user = data.user;
+      toast('가입 완료! 바로 이용할 수 있습니다.');
+      await loadUserGroup();
+      return;
+    }
+
+    const { error: loginError } = await supabase.auth.signInWithPassword({ email, password });
+    if (loginError) {
+      return toast('가입은 됐지만 바로 로그인이 안 됩니다. Supabase에서 이메일 인증을 끄거나 잠시 후 다시 로그인하세요.');
+    }
+
+    state.user = (await supabase.auth.getUser()).data.user;
     toast('가입 완료! 로그인되었습니다.');
     await loadUserGroup();
-    return;
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setButtonLoading(submitBtn, false);
   }
-
-  toast('가입 완료! 이메일 인증 링크를 확인한 뒤 로그인하세요.');
 });
+
+function translateAuthError(message) {
+  if (message.includes('Invalid login credentials')) return '아이디 또는 비밀번호가 맞지 않습니다.';
+  if (message.includes('User already registered')) return '이미 사용 중인 아이디입니다.';
+  if (message.includes('Email not confirmed')) return '계정 확인이 필요합니다. Supabase에서 이메일 인증을 꺼 주세요.';
+  return message;
+}
 
 $('logout-btn').addEventListener('click', async () => {
   await supabase.auth.signOut();
