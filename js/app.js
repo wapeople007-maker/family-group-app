@@ -39,12 +39,6 @@ function toAuthEmail(username) {
   return `${id}@${AUTH_EMAIL_DOMAIN}`;
 }
 
-function toAuthIdentity(input) {
-  const value = input.trim();
-  if (value.includes('@')) return value;
-  return toAuthEmail(value);
-}
-
 function setButtonLoading(button, isLoading, loadingText) {
   if (!button) return;
   button.disabled = isLoading;
@@ -398,9 +392,9 @@ $('login-form').addEventListener('submit', async (e) => {
   setButtonLoading(submitBtn, true, '로그인 중...');
 
   try {
-    const identity = $('login-username').value.trim();
+    const username = $('login-username').value.trim();
     const password = $('login-password').value;
-    const email = toAuthIdentity(identity);
+    const email = toAuthEmail(username);
 
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) return toast(translateAuthError(error.message));
@@ -447,7 +441,7 @@ $('signup-form').addEventListener('submit', async (e) => {
 
     const { error: loginError } = await supabase.auth.signInWithPassword({ email, password });
     if (loginError) {
-      return toast('가입은 됐지만 바로 로그인이 안 됩니다. Supabase에서 이메일 인증을 끄거나 잠시 후 다시 로그인하세요.');
+      return toast(`가입 후 로그인 실패: ${translateAuthError(loginError.message)}`);
     }
 
     state.user = (await supabase.auth.getUser()).data.user;
@@ -463,10 +457,10 @@ $('signup-form').addEventListener('submit', async (e) => {
 
 function translateAuthError(message) {
   if (message.includes('Invalid login credentials')) {
-    return '아이디/이메일 또는 비밀번호가 맞지 않습니다. 예전에 가입했다면 이메일 전체를 입력해 보세요.';
+    return '아이디 또는 비밀번호가 맞지 않습니다. 회원가입을 먼저 해 주세요.';
   }
-  if (message.includes('User already registered')) return '이미 사용 중인 아이디입니다.';
-  if (message.includes('Email not confirmed')) return '계정 확인이 필요합니다. Supabase에서 이메일 인증을 꺼 주세요.';
+  if (message.includes('User already registered')) return '이미 사용 중인 아이디입니다. 로그인해 주세요.';
+  if (message.includes('Email not confirmed')) return '가입 처리 중입니다. 잠시 후 다시 로그인해 주세요.';
   return message;
 }
 
