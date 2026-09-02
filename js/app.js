@@ -67,26 +67,48 @@ function generateInviteCode() {
 }
 
 async function getSession() {
+  if (!supabase) return null;
   const { data } = await supabase.auth.getSession();
   state.user = data.session?.user ?? null;
   return state.user;
 }
 
+async function ensureProfile(displayName) {
+  if (!supabase || !state.user) return;
+
+  const name = displayName
+    || state.user.user_metadata?.display_name
+    || state.user.email?.split('@')[0]
+    || '회원';
+
+  await supabase.from('profiles').upsert(
+    { id: state.user.id, display_name: name },
+    { onConflict: 'id' }
+  );
+}
+
 async function refreshGroupContext() {
-  if (!state.group) return;
+  if (!state.group || !supabase) return null;
 
   const { data: members, error } = await supabase
     .from('group_members')
     .select('id, role, user_id, profiles(display_name)')
     .eq('group_id', state.group.id);
 
-  if (error) throw error;
+  if (error) return error.message;
+
   state.members = members ?? [];
   $('group-name').textContent = state.group.name;
   $('invite-code').textContent = state.group.invite_code;
+  return null;
 }
 
 async function loadUserGroup() {
+  if (!supabase || !state.user) {
+    showScreen('auth-screen');
+    return false;
+  }
+
   const { data, error } = await supabase
     .from('group_members')
     .select('group_id, groups(id, name, invite_code)')
@@ -94,11 +116,20 @@ async function loadUserGroup() {
     .limit(1)
     .maybeSingle();
 
-  if (error) throw error;
+  if (error) {
+    toast(error.message);
+    showScreen('group-screen');
+    return false;
+  }
 
   if (data?.groups) {
     state.group = data.groups;
-    await refreshGroupContext();
+    const contextError = await refreshGroupContext();
+    if (contextError) {
+      toast(contextError);
+      showScreen('group-screen');
+      return false;
+    }
     showScreen('app-screen');
     await switchTab('home');
     subscribeRealtime();
@@ -369,6 +400,7 @@ $('login-form').addEventListener('submit', async (e) => {
     if (error) return toast(translateAuthError(error.message));
 
     state.user = (await supabase.auth.getUser()).data.user;
+    await ensureProfile(displayName);
     toast('로그인되었습니다.');
     await loadUserGroup();
   } catch (error) {
@@ -401,6 +433,7 @@ $('signup-form').addEventListener('submit', async (e) => {
 
     if (data.session) {
       state.user = data.user;
+      await ensureProfile(displayName);
       toast('가입 완료! 바로 이용할 수 있습니다.');
       await loadUserGroup();
       return;
@@ -412,6 +445,7 @@ $('signup-form').addEventListener('submit', async (e) => {
     }
 
     state.user = (await supabase.auth.getUser()).data.user;
+    await ensureProfile(displayName);
     toast('가입 완료! 로그인되었습니다.');
     await loadUserGroup();
   } catch (error) {
@@ -439,63 +473,137 @@ $('logout-btn').addEventListener('click', async () => {
 // Group handlers
 $('create-group-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const name = $('create-group-name').value.trim();
-  const inviteCode = generateInviteCode();
+  const submitBtn = $('create-group-submit');
+  setButtonLoading(submitBtn, true, '생성 중...');
 
-  const { data: group, error: groupError } = await supabase
-    .from('groups')
-    .insert({ name, invite_code: inviteCode, created_by: state.user.id })
-    .select('*')
-    .single();
+  try {
+    if (!supabase) {
+      toast('Supabase 연결이 필요합니다.');
+      return;
+    }
+    if (!state.user) {
+      toast('로그인이 필요합니다. 다시 로그인해 주세요.');
+      showScreen('auth-screen');
+      return;
+    }
 
-  if (groupError) return toast(groupError.message);
+    const name = $('create-group-name').value.trim();
+    if (!name) {
+      toast('모임 이름을 입력하세요.');
+      return;
+    }
 
-  const { error: memberError } = await supabase.from('group_members').insert({
-    group_id: group.id,
-    user_id: state.user.id,
-    role: 'admin',
-  });
+    const inviteCode = generateInviteCode();
 
-  if (memberError) return toast(memberError.message);
+    const { data: group, error: groupError } = await supabase
+      .from('groups')
+      .insert({ name, invite_code: inviteCode, created_by: state.user.id })
+      .select('id, name, invite_code')
+      .single();
 
-  state.group = group;
-  await refreshGroupContext();
-  showScreen('app-screen');
-  subscribeRealtime();
-  toast(`모임이 생성되었습니다. 초대 코드: ${inviteCode}`);
-  await switchTab('home');
+    if (groupError) {
+      toast(`모임 생성 실패: ${groupError.message}`);
+      return;
+    }
+
+    const { error: memberError } = await supabase.from('group_members').insert({
+      group_id: group.id,
+      user_id: state.user.id,
+      role: 'admin',
+    });
+
+    if (memberError) {
+      toast(`멤버 등록 실패: ${memberError.message}`);
+      return;
+    }
+
+    state.group = group;
+    const contextError = await refreshGroupContext();
+    if (contextError) {
+      toast(contextError);
+      return;
+    }
+
+    showScreen('app-screen');
+    subscribeRealtime();
+    toast(`모임이 생성되었습니다! 초대 코드: ${inviteCode}`);
+    $('create-group-name').value = '';
+    await switchTab('home');
+  } catch (error) {
+    toast(error.message || '모임 생성 중 오류가 발생했습니다.');
+  } finally {
+    setButtonLoading(submitBtn, false);
+  }
 });
 
 $('join-group-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const code = $('join-group-code').value.trim().toUpperCase();
+  const submitBtn = $('join-group-submit');
+  setButtonLoading(submitBtn, true, '참여 중...');
 
-  const { data: group, error: findError } = await supabase
-    .from('groups')
-    .select('*')
-    .eq('invite_code', code)
-    .maybeSingle();
+  try {
+    if (!supabase) {
+      toast('Supabase 연결이 필요합니다.');
+      return;
+    }
+    if (!state.user) {
+      toast('로그인이 필요합니다. 다시 로그인해 주세요.');
+      showScreen('auth-screen');
+      return;
+    }
 
-  if (findError) return toast(findError.message);
-  if (!group) return toast('초대 코드를 찾을 수 없습니다.');
+    const code = $('join-group-code').value.trim().toUpperCase();
+    if (!code) {
+      toast('초대 코드를 입력하세요.');
+      return;
+    }
 
-  const { error: joinError } = await supabase.from('group_members').insert({
-    group_id: group.id,
-    user_id: state.user.id,
-    role: 'member',
-  });
+    const { data: group, error: findError } = await supabase
+      .from('groups')
+      .select('id, name, invite_code')
+      .eq('invite_code', code)
+      .maybeSingle();
 
-  if (joinError) {
-    if (joinError.code === '23505') return toast('이미 가입한 모임입니다.');
-    return toast(joinError.message);
+    if (findError) {
+      toast(findError.message);
+      return;
+    }
+    if (!group) {
+      toast('초대 코드를 찾을 수 없습니다.');
+      return;
+    }
+
+    const { error: joinError } = await supabase.from('group_members').insert({
+      group_id: group.id,
+      user_id: state.user.id,
+      role: 'member',
+    });
+
+    if (joinError) {
+      if (joinError.code === '23505') {
+        toast('이미 가입한 모임입니다.');
+      } else {
+        toast(joinError.message);
+      }
+      return;
+    }
+
+    state.group = group;
+    const contextError = await refreshGroupContext();
+    if (contextError) {
+      toast(contextError);
+      return;
+    }
+
+    showScreen('app-screen');
+    subscribeRealtime();
+    toast('모임에 참여했습니다!');
+    await switchTab('home');
+  } catch (error) {
+    toast(error.message || '모임 참여 중 오류가 발생했습니다.');
+  } finally {
+    setButtonLoading(submitBtn, false);
   }
-
-  state.group = group;
-  await refreshGroupContext();
-  showScreen('app-screen');
-  subscribeRealtime();
-  toast('모임에 참여했습니다!');
-  await switchTab('home');
 });
 
 // Tab navigation
