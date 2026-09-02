@@ -106,7 +106,18 @@
         <h2>일정 추가</h2>
         <input id="schedule-title" type="text" required placeholder="제목" />
         <input id="schedule-start" type="datetime-local" required />
-        <input id="schedule-location" type="text" placeholder="장소 (선택)" />
+        <div>
+          <label for="schedule-location">장소</label>
+          <div class="row map-search-row">
+            <input id="schedule-location" type="text" placeholder="장소명 검색 또는 지도에서 클릭" />
+            <button id="schedule-search-btn" class="btn-secondary" type="button">검색</button>
+          </div>
+          <ul id="schedule-search-results" class="search-results hidden"></ul>
+        </div>
+        <div id="schedule-map-picker" class="map-container hidden" aria-label="장소 선택 지도"></div>
+        <p id="schedule-map-hint" class="map-hint hidden">검색 결과를 선택하거나, 지도를 클릭해 장소를 지정하세요.</p>
+        <input id="schedule-lat" type="hidden" />
+        <input id="schedule-lng" type="hidden" />
         <button class="btn-primary" type="submit">추가</button>
       </form>
       <div id="schedule-list" class="list" style="margin-top:16px"></div>

@@ -1,7 +1,23 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
+import {
+  createScheduleMapPicker,
+  getDirectionsUrl,
+  isKakaoMapConfigured,
+  loadKakaoMapSDK,
+  renderMiniMap,
+} from './kakao-map.js';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+function isSupabaseConfigured() {
+  return Boolean(SUPABASE_URL)
+    && Boolean(SUPABASE_ANON_KEY)
+    && !SUPABASE_URL.includes('YOUR_SUPABASE')
+    && !SUPABASE_ANON_KEY.includes('YOUR_SUPABASE');
+}
+
+const supabase = isSupabaseConfigured()
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -10,6 +26,7 @@ const state = {
   group: null,
   members: [],
   realtimeChannel: null,
+  scheduleMapPicker: null,
 };
 
 function toast(message) {
@@ -100,7 +117,10 @@ async function switchTab(tab) {
   });
 
   if (tab === 'home') await loadHome();
-  if (tab === 'schedules') await loadSchedules();
+  if (tab === 'schedules') {
+    await initScheduleMapPicker();
+    await loadSchedules();
+  }
   if (tab === 'todos') await loadTodos();
   if (tab === 'album') await loadPhotos();
   if (tab === 'expenses') await loadExpenses();
@@ -142,6 +162,44 @@ async function loadHome() {
     .join('') || '<p class="muted">등록된 일정이 없습니다.</p>';
 }
 
+async function initScheduleMapPicker() {
+  const mapContainer = $('schedule-map-picker');
+  const mapHint = $('schedule-map-hint');
+
+  if (!isKakaoMapConfigured()) {
+    mapContainer.classList.add('hidden');
+    mapHint.classList.add('hidden');
+    return;
+  }
+
+  if (state.scheduleMapPicker) return;
+
+  try {
+    await loadKakaoMapSDK();
+    mapContainer.classList.remove('hidden');
+    mapHint.classList.remove('hidden');
+
+    state.scheduleMapPicker = createScheduleMapPicker(mapContainer, {
+      onSelect: (location) => {
+        $('schedule-location').value = location.name;
+        $('schedule-lat').value = location.lat;
+        $('schedule-lng').value = location.lng;
+      },
+    });
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function resetScheduleLocationFields() {
+  $('schedule-location').value = '';
+  $('schedule-lat').value = '';
+  $('schedule-lng').value = '';
+  $('schedule-search-results').classList.add('hidden');
+  $('schedule-search-results').innerHTML = '';
+  state.scheduleMapPicker?.reset();
+}
+
 async function loadSchedules() {
   const { data, error } = await supabase
     .from('schedules')
@@ -153,18 +211,39 @@ async function loadSchedules() {
 
   $('schedule-list').innerHTML = (data ?? [])
     .map((s) => {
-      const mapLink = s.location_lat && s.location_lng
-        ? `<a href="https://map.kakao.com/link/map/${encodeURIComponent(s.location_name || '모임장소')},${s.location_lat},${s.location_lng}" target="_blank" rel="noopener">길찾기</a>`
+      const hasCoords = s.location_lat && s.location_lng;
+      const mapLink = hasCoords
+        ? `<a class="link-btn" href="${getDirectionsUrl(s.location_name, s.location_lat, s.location_lng)}" target="_blank" rel="noopener">길찾기</a>`
         : '';
+      const mapBlock = hasCoords
+        ? `<div class="mini-map" data-mini-map data-lat="${s.location_lat}" data-lng="${s.location_lng}" data-title="${escapeHtml(s.location_name || s.title)}"></div>`
+        : '';
+
       return `
         <div class="item">
           <h3>${escapeHtml(s.title)}</h3>
           <p>${formatDateTime(s.start_at)}${s.location_name ? ` · ${escapeHtml(s.location_name)}` : ''}</p>
           ${s.description ? `<p>${escapeHtml(s.description)}</p>` : ''}
+          ${mapBlock}
           <div class="row">${mapLink}<button class="btn-danger" data-delete-schedule="${s.id}">삭제</button></div>
         </div>`;
     })
     .join('') || '<p class="muted">일정을 추가해 보세요.</p>';
+
+  if (isKakaoMapConfigured() && (data ?? []).some((s) => s.location_lat && s.location_lng)) {
+    try {
+      await loadKakaoMapSDK();
+      document.querySelectorAll('[data-mini-map]').forEach((el) => {
+        renderMiniMap(el, {
+          lat: Number(el.dataset.lat),
+          lng: Number(el.dataset.lng),
+          title: el.dataset.title,
+        });
+      });
+    } catch (error) {
+      toast(error.message);
+    }
+  }
 }
 
 async function loadTodos() {
@@ -258,6 +337,7 @@ function formatDateTime(value) {
 // Auth handlers
 $('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (!supabase) return toast('Supabase 설정이 필요합니다. js/config.js를 확인하세요.');
   const email = $('login-email').value.trim();
   const password = $('login-password').value;
 
@@ -271,18 +351,28 @@ $('login-form').addEventListener('submit', async (e) => {
 
 $('signup-form').addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (!supabase) return toast('Supabase 설정이 필요합니다. js/config.js를 확인하세요.');
+
   const email = $('signup-email').value.trim();
   const password = $('signup-password').value;
   const displayName = $('signup-name').value.trim();
 
-  const { error } = await supabase.auth.signUp({
+  const { data, error } = await supabase.auth.signUp({
     email,
     password,
     options: { data: { display_name: displayName } },
   });
 
   if (error) return toast(error.message);
-  toast('가입 완료! 이메일 확인 후 로그인하세요.');
+
+  if (data.session) {
+    state.user = data.user;
+    toast('가입 완료! 로그인되었습니다.');
+    await loadUserGroup();
+    return;
+  }
+
+  toast('가입 완료! 이메일 인증 링크를 확인한 뒤 로그인하세요.');
 });
 
 $('logout-btn').addEventListener('click', async () => {
@@ -361,22 +451,71 @@ document.querySelectorAll('.tab').forEach((btn) => {
 });
 
 // Create forms
+$('schedule-search-btn').addEventListener('click', async () => {
+  if (!state.scheduleMapPicker) {
+    await initScheduleMapPicker();
+  }
+  if (!state.scheduleMapPicker) return;
+
+  const keyword = $('schedule-location').value.trim();
+  if (!keyword) return toast('검색할 장소를 입력하세요.');
+
+  const results = await state.scheduleMapPicker.search(keyword);
+  const list = $('schedule-search-results');
+
+  if (!results.length) {
+    list.innerHTML = '<li class="search-empty">검색 결과가 없습니다.</li>';
+    list.classList.remove('hidden');
+    return;
+  }
+
+  list.innerHTML = results
+    .slice(0, 5)
+    .map((place, index) => `
+      <li>
+        <button type="button" class="search-result-btn" data-search-index="${index}">
+          <strong>${escapeHtml(place.place_name)}</strong>
+          <span>${escapeHtml(place.road_address_name || place.address_name || '')}</span>
+        </button>
+      </li>`)
+    .join('');
+  list.classList.remove('hidden');
+  list.dataset.results = JSON.stringify(results.slice(0, 5));
+});
+
+$('schedule-search-results').addEventListener('click', (e) => {
+  const button = e.target.closest('[data-search-index]');
+  if (!button || !state.scheduleMapPicker) return;
+
+  const results = JSON.parse($('schedule-search-results').dataset.results || '[]');
+  const place = results[Number(button.dataset.searchIndex)];
+  if (!place) return;
+
+  state.scheduleMapPicker.selectSearchResult(place);
+  $('schedule-search-results').classList.add('hidden');
+});
+
 $('schedule-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const title = $('schedule-title').value.trim();
   const startAt = $('schedule-start').value;
   const locationName = $('schedule-location').value.trim();
+  const locationLat = $('schedule-lat').value ? Number($('schedule-lat').value) : null;
+  const locationLng = $('schedule-lng').value ? Number($('schedule-lng').value) : null;
 
   const { error } = await supabase.from('schedules').insert({
     group_id: state.group.id,
     title,
     start_at: new Date(startAt).toISOString(),
     location_name: locationName || null,
+    location_lat: locationLat,
+    location_lng: locationLng,
     created_by: state.user.id,
   });
 
   if (error) return toast(error.message);
   e.target.reset();
+  resetScheduleLocationFields();
   toast('일정이 추가되었습니다.');
   await loadSchedules();
 });
@@ -474,8 +613,17 @@ document.body.addEventListener('change', async (e) => {
 
 // Boot
 (async function init() {
-  if (SUPABASE_URL.includes('YOUR_SUPABASE') || SUPABASE_ANON_KEY.includes('YOUR_SUPABASE')) {
+  if (!isSupabaseConfigured()) {
     toast('js/config.js에 Supabase URL과 anon key를 입력하세요.');
+  }
+
+  if (!isKakaoMapConfigured()) {
+    toast('js/config.js에 카카오 JavaScript 키를 입력하면 지도 기능이 활성화됩니다.');
+  }
+
+  if (!supabase) {
+    showScreen('auth-screen');
+    return;
   }
 
   await getSession();
