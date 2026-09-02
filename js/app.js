@@ -340,7 +340,7 @@ async function loadPhotos() {
 async function loadExpenses() {
   const { data, error } = await supabase
     .from('expenses')
-    .select('*, profiles:paid_by(display_name)')
+    .select('*, profiles!expenses_paid_by_fkey(display_name)')
     .eq('group_id', state.group.id)
     .order('expense_date', { ascending: false });
 
